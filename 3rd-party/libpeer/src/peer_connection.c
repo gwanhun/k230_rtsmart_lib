@@ -59,10 +59,13 @@ struct PeerConnection {
   int remote_video_recvonly;
 };
 
+extern volatile int udp_send_nonblock;
 static void peer_connection_outgoing_rtp_packet(uint8_t* data, size_t size, void* user_data) {
   PeerConnection* pc = (PeerConnection*)user_data;
   dtls_srtp_encrypt_rtp_packet(&pc->dtls_srtp, data, (int*)&size);
+  udp_send_nonblock = 1;   /* 미디어 전송만 논블로킹(루프 16초 멈춤 방지). 핸드셰이크는 블로킹 유지 */
   agent_send(&pc->agent, data, size);
+  udp_send_nonblock = 0;
 }
 
 #define DTLS_RECORD_HEADER_LEN 13
