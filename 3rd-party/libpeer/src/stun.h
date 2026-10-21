@@ -106,6 +106,7 @@ struct StunMessage {
   uint16_t data_offset;
   uint16_t data_len;
   uint16_t channel_number;
+  uint8_t use_candidate;   /* 바인딩 요청에 USE-CANDIDATE 가 있었는지(controlled 측 지명 추종) */
   uint8_t buf[STUN_ATTR_BUF_SIZE];
   size_t size;
 };
