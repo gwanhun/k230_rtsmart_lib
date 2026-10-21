@@ -21,6 +21,8 @@ int udp_socket_bind(UdpSocket* udp_socket, int port);
 
 void udp_socket_close(UdpSocket* udp_socket);
 
+extern volatile int udp_send_nonblock;
+
 int udp_socket_sendto(UdpSocket* udp_socket, Address* bind_addr, const uint8_t* buf, int len);
 
 int udp_socket_recvfrom(UdpSocket* udp_sock, Address* bind_addr, uint8_t* buf, int len);
