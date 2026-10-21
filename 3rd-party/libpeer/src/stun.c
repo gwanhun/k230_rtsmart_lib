@@ -156,6 +156,7 @@ int stun_parse_msg_buf(StunMessage* msg, size_t received_size) {
     return -1;
   }
   msg->size = length;
+  msg->use_candidate = 0;
 
   msg->stunclass = ntohs(header->type);
   if ((msg->stunclass & STUN_CLASS_ERROR) == STUN_CLASS_ERROR) {
@@ -263,7 +264,7 @@ int stun_parse_msg_buf(StunMessage* msg, size_t received_size) {
       case STUN_ATTR_TYPE_PRIORITY:
         break;
       case STUN_ATTR_TYPE_USE_CANDIDATE:
-        // LOGD("Use Candidate");
+        msg->use_candidate = 1;
         break;
       case STUN_ATTR_TYPE_FINGERPRINT:
         if (attr_len != sizeof(msg->fingerprint)) return -1;
