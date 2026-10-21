@@ -461,6 +461,11 @@ int peer_connection_loop(PeerConnection* pc) {
 
     case PEER_CONNECTION_CHECKING:
       if (agent_select_candidate_pair(&pc->agent) < 0) {
+        /* trickle: 아직 점검할 쌍이 없으면(후보가 나중에 옴) 실패로 확정하지 않고 기다린다.
+         * 세션 타임아웃은 상위(앱/파이썬 TTL)가 처리한다. */
+        break;
+      }
+      if (0) {
         STATE_CHANGED(pc, PEER_CONNECTION_FAILED);
       } else if (agent_connectivity_check(&pc->agent) == 0) {
     {
@@ -992,5 +997,7 @@ int peer_connection_add_ice_candidate(PeerConnection* pc, char* candidate) {
   agent->remote_candidates[agent->remote_candidates_count] = parsed_candidate;
   LOGD("Add candidate: %s", candidate);
   agent->remote_candidates_count++;
+  /* trickle: 새 원격 후보로 쌍을 만들어야 연결 점검 대상이 된다 */
+  agent_add_remote_candidate_pairs(agent, agent->remote_candidates_count - 1);
   return 0;
 }
