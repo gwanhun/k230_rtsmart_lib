@@ -159,7 +159,18 @@ int udp_socket_sendto(UdpSocket* udp_socket, Address* addr, const uint8_t* buf, 
       break;
   }
 
-  if ((ret = sendto(udp_socket->fd, buf, len, 0, sa, sock_len)) < 0) {
+  {
+    int send_flags = 0;
+#ifdef MSG_DONTWAIT
+    send_flags = MSG_DONTWAIT;  /* rt-smart lwIP: 블로킹 sendto 가 버퍼 포화 시 single-thread WebRTC 루프를
+                                 * 16초까지 정지시켰다(2026-10-21 TURN relay 실측) → 논블로킹 + 드롭 */
+#endif
+    ret = sendto(udp_socket->fd, buf, len, send_flags, sa, sock_len);
+  }
+  if (ret < 0) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      return len;  /* 전송 버퍼 포화 → 이 패킷 드롭(RTP 비신뢰). 상위엔 '보냄'으로 보고 */
+    }
     LOGE("Failed to sendto: %s", strerror(errno));
     return -1;
   }
