@@ -51,6 +51,12 @@ struct PeerConnection {
 
   uint32_t remote_assrc;
   uint32_t remote_vssrc;
+
+  /* answerer 모드: 원격 offer 의 video m-section 에서 읽은 협상 값(없으면 0/빈 문자열 → 기본 96/"video").
+   * libpeer 는 원래 고정 템플릿으로 answer 를 만들어 브라우저가 거부했다(mid/PT 불일치). */
+  int remote_video_pt;
+  char remote_video_mid[32];
+  int remote_video_recvonly;
 };
 
 static void peer_connection_outgoing_rtp_packet(uint8_t* data, size_t size, void* user_data) {
@@ -555,6 +561,11 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
   DtlsSrtpRole role = DTLS_SRTP_ROLE_SERVER;
   int is_update = 0;
   Agent* agent;
+  int in_video = 0;
+  int h264_pts[8];
+  int h264_pt_count = 0;
+  int h264_pt_pm1 = 0;      /* fmtp 에 packetization-mode=1 이 있는 첫 H264 PT */
+  int h264_pt_best = 0;     /* 42e01f + packetization-mode=1 */
 
   if (pc == NULL || sdp == NULL) {
     return;
@@ -569,6 +580,12 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
   start = sdp;
   sdp_end = sdp + sdp_len;
 
+  if (type == SDP_TYPE_OFFER) {
+    pc->remote_video_pt = 0;
+    pc->remote_video_mid[0] = '\0';
+    pc->remote_video_recvonly = 0;
+  }
+
   while (start < sdp_end) {
     size_t line_len;
     line = strstr(start, "\r\n");
@@ -576,6 +593,64 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
       line = sdp_end;
     }
     line_len = (size_t)(line - start);
+
+    if (type == SDP_TYPE_OFFER) {
+      if (line_len >= 2 && start[0] == 'm' && start[1] == '=') {
+        in_video = (line_len >= strlen("m=video") && memcmp(start, "m=video", strlen("m=video")) == 0);
+      } else if (in_video) {
+        if (line_len > strlen("a=mid:") && memcmp(start, "a=mid:", strlen("a=mid:")) == 0) {
+          size_t n = line_len - strlen("a=mid:");
+          if (n >= sizeof(pc->remote_video_mid)) {
+            n = sizeof(pc->remote_video_mid) - 1;
+          }
+          memcpy(pc->remote_video_mid, start + strlen("a=mid:"), n);
+          pc->remote_video_mid[n] = '\0';
+        } else if (line_len == strlen("a=recvonly") && memcmp(start, "a=recvonly", line_len) == 0) {
+          pc->remote_video_recvonly = 1;
+        } else if (line_len > strlen("a=rtpmap:") && memcmp(start, "a=rtpmap:", strlen("a=rtpmap:")) == 0) {
+          int pt = 0;
+          const char* q = start + strlen("a=rtpmap:");
+          while (q < line && *q >= '0' && *q <= '9') {
+            pt = pt * 10 + (*q - '0');
+            q++;
+          }
+          if (q < line && *q == ' ' && (size_t)(line - q) > strlen(" H264/90000") - 1 &&
+              memcmp(q, " H264/90000", strlen(" H264/90000")) == 0 && pt > 0 && pt < 128 &&
+              h264_pt_count < (int)(sizeof(h264_pts) / sizeof(h264_pts[0]))) {
+            h264_pts[h264_pt_count++] = pt;
+          }
+        } else if (line_len > strlen("a=fmtp:") && memcmp(start, "a=fmtp:", strlen("a=fmtp:")) == 0) {
+          int pt = 0;
+          const char* q = start + strlen("a=fmtp:");
+          while (q < line && *q >= '0' && *q <= '9') {
+            pt = pt * 10 + (*q - '0');
+            q++;
+          }
+          if (pt > 0) {
+            int is_h264 = 0;
+            for (int k = 0; k < h264_pt_count; k++) {
+              if (h264_pts[k] == pt) {
+                is_h264 = 1;
+              }
+            }
+            if (is_h264) {
+              char tmp[200];
+              size_t n = line_len < sizeof(tmp) - 1 ? line_len : sizeof(tmp) - 1;
+              memcpy(tmp, start, n);
+              tmp[n] = '\0';
+              if (strstr(tmp, "packetization-mode=1") != NULL) {
+                if (h264_pt_pm1 == 0) {
+                  h264_pt_pm1 = pt;
+                }
+                if (h264_pt_best == 0 && strstr(tmp, "42e01f") != NULL) {
+                  h264_pt_best = pt;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
 
     if (line_len == strlen("a=setup:passive") &&
         memcmp(start, "a=setup:passive", line_len) == 0) {
@@ -660,6 +735,19 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
     start = line + 2;
   }
 
+  if (type == SDP_TYPE_OFFER) {
+    if (h264_pt_best) {
+      pc->remote_video_pt = h264_pt_best;
+    } else if (h264_pt_pm1) {
+      pc->remote_video_pt = h264_pt_pm1;
+    } else if (h264_pt_count > 0) {
+      pc->remote_video_pt = h264_pts[0];
+    }
+    LOGI("remote offer: video mid=%s h264_pt=%d recvonly=%d",
+         pc->remote_video_mid[0] ? pc->remote_video_mid : "(none)", pc->remote_video_pt,
+         pc->remote_video_recvonly);
+  }
+
   if (is_update) {
     return;
   }
@@ -721,10 +809,11 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
 
   memset(pc->sdp, 0, sizeof(pc->sdp));
   // TODO: check if we have video or audio codecs
-  sdp_create(pc->sdp,
-             pc->config.video_codec != CODEC_NONE,
-             pc->config.audio_codec != CODEC_NONE,
-             pc->config.datachannel);
+  sdp_create_mid(pc->sdp,
+                 pc->config.video_codec != CODEC_NONE,
+                 pc->config.audio_codec != CODEC_NONE,
+                 pc->config.datachannel,
+                 (sdp_type == SDP_TYPE_ANSWER && pc->remote_video_mid[0]) ? pc->remote_video_mid : "video");
 
   if (agent_create_ice_credential(&pc->agent) != 0) {
     STATE_CHANGED(pc, PEER_CONNECTION_FAILED);
@@ -749,7 +838,16 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
   // Chrome only extracts candidates from the BUNDLE-base section.
   // Build: m=video → candidates → m=audio → m=datachannel
   if (pc->config.video_codec == CODEC_H264) {
-    sdp_append_h264(pc->sdp);
+    if (sdp_type == SDP_TYPE_ANSWER && pc->remote_video_pt > 0) {
+      /* answerer: offer 의 PT/mid 를 따르고(JSEP), RTP 헤더의 PT 도 같이 바꾼다 */
+      pc->vrtp_encoder.type = (RtpPayloadType)pc->remote_video_pt;
+      sdp_append_h264_pt(pc->sdp, pc->remote_video_pt,
+                         pc->remote_video_mid[0] ? pc->remote_video_mid : "video",
+                         pc->remote_video_recvonly);
+    } else {
+      pc->vrtp_encoder.type = PT_H264;
+      sdp_append_h264(pc->sdp);
+    }
   } else if (pc->config.video_codec == CODEC_H265) {
     sdp_append_h265(pc->sdp);
   }
