@@ -1128,6 +1128,27 @@ void agent_process_stun_request(Agent* agent, StunMessage* stun_msg, Address* ad
           agent_socket_send(agent, addr, msg.buf, msg.size);
         }
         agent->binding_request_time = ports_get_epoch_time();
+        /* controlled 측은 controlling 측이 USE-CANDIDATE 로 지명한 쌍을 따라야 한다(RFC 8445 7.3.1.5).
+         * libpeer 는 자기 응답이 먼저 온 쌍(예: TURN relay)으로 고정해, 상대가 고른 직접 경로와 어긋나
+         * 초반 몇 초만 영상이 가고 끊겼다(2026-10-21). 지명된 원격 주소와 일치하는 쌍으로 전환한다. */
+        if (stun_msg->use_candidate && agent->mode == AGENT_MODE_CONTROLLED) {
+          int i;
+          for (i = 0; i < agent->candidate_pairs_num; i++) {
+            IceCandidatePair* p = &agent->candidate_pairs[i];
+            if (addr_equal(&p->remote->addr, addr)) {
+              if (agent->nominated_pair != p) {
+                char a[ADDRSTRLEN] = {0};
+                addr_to_string(addr, a, sizeof(a));
+                LOGI("remote nominated pair (USE-CANDIDATE) -> switch to %s:%d (local type=%d remote type=%d)",
+                     a, addr->port, p->local->type, p->remote->type);
+                p->state = ICE_CANDIDATE_STATE_SUCCEEDED;
+                agent->nominated_pair = p;
+                agent->selected_pair = p;
+              }
+              break;
+            }
+          }
+        }
       }
       break;
     default:
