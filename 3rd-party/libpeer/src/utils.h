@@ -22,6 +22,7 @@
 
 #if LOG_REDIRECT
 void peer_log(char* level_tag, const char* file_name, int line_number, const char* fmt, ...);
+int peer_log_read(char* out, int max, int* dropped);
 #define LOG_PRINT(level_tag, fmt, ...) \
   peer_log(level_tag, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #else
