@@ -13,11 +13,21 @@
 #include "sctp.h"
 #include "sdp.h"
 
+extern volatile int udp_send_nonblock;
+
+/* COMPLETED(핸드셰이크 완료) 이후에만 모든 UDP 전송을 논블로킹으로: 포화된 relay 경로에서
+ * 미디어/consent/TURN 전송이 블로킹 sendto 로 single-thread 루프를 16초 멈추는 문제 방지
+ * (2026-10-21). CHECKING/CONNECTED(DTLS 핸드셰이크 중)에는 블로킹 유지 → 핸드셰이크 신뢰. */
 #define STATE_CHANGED(pc, curr_state)                                 \
-  if (pc->oniceconnectionstatechange && pc->state != curr_state) {    \
-    pc->oniceconnectionstatechange(curr_state, pc->config.user_data); \
-    pc->state = curr_state;                                           \
-  }
+  do {                                                                \
+    if (pc->state != curr_state) {                                    \
+      udp_send_nonblock = ((curr_state) == PEER_CONNECTION_COMPLETED) ? 1 : 0; \
+      if (pc->oniceconnectionstatechange) {                           \
+        pc->oniceconnectionstatechange(curr_state, pc->config.user_data); \
+      }                                                               \
+      pc->state = curr_state;                                         \
+    }                                                                 \
+  } while (0)
 
 struct PeerConnection {
   PeerConfiguration config;
@@ -63,9 +73,7 @@ extern volatile int udp_send_nonblock;
 static void peer_connection_outgoing_rtp_packet(uint8_t* data, size_t size, void* user_data) {
   PeerConnection* pc = (PeerConnection*)user_data;
   dtls_srtp_encrypt_rtp_packet(&pc->dtls_srtp, data, (int*)&size);
-  udp_send_nonblock = 1;   /* 미디어 전송만 논블로킹(루프 16초 멈춤 방지). 핸드셰이크는 블로킹 유지 */
   agent_send(&pc->agent, data, size);
-  udp_send_nonblock = 0;
 }
 
 #define DTLS_RECORD_HEADER_LEN 13
