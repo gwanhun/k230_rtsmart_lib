@@ -120,6 +120,8 @@ void agent_destroy(Agent* agent);
 
 void agent_update_candidate_pairs(Agent* agent);
 
+int agent_add_remote_candidate_pairs(Agent* agent, int remote_idx);
+
 int agent_turn_setup_relay(Agent* agent);
 
 int agent_turn_refresh(Agent* agent);
