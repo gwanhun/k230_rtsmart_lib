@@ -14,7 +14,8 @@
 
 #define AGENT_CONNCHECK_MAX 100
 #define AGENT_CONNCHECK_INTERVAL_MS 50
-#define AGENT_STUN_RECV_MAXTIMES 1000
+#define AGENT_STUN_RECV_MAXTIMES 100  /* 1000→100: rt-smart 에서 ports_sleep_ms(1) 이 10ms 틱이라
+                                      * 1000 회면 요청당 ~10초 블로킹(워커가 락을 쥔 채) → 메인 루프 정지. */
 
 static int agent_is_private_ipv4(Address* addr) {
   uint32_t ip;
@@ -1344,6 +1345,34 @@ int agent_set_remote_description(Agent* agent, char* description) {
   LOGD("remote ufrag: %s", agent->remote_ufrag);
   LOGD("remote upwd: %s", agent->remote_upwd);
   return 0;
+}
+
+/* trickle ICE: add_ice_candidate 로 나중에 온 원격 후보 하나에 대해 로컬 후보들과의 쌍을 뒤에 붙인다.
+ * agent_update_candidate_pairs 는 쌍 배열을 초기화/정렬해 active_pairs 포인터를 깨므로 쓰지 않는다.
+ * (원래 libpeer 는 answer 생성 시점의 후보로만 쌍을 만들어, 후보 없이 trickle 하는 앱과 연결이 안 됐다.) */
+int agent_add_remote_candidate_pairs(Agent* agent, int remote_idx) {
+  int i, added = 0;
+  if (remote_idx < 0 || remote_idx >= agent->remote_candidates_count) return 0;
+  for (i = 0; i < agent->local_candidates_count; i++) {
+    IceCandidate* local = &agent->local_candidates[i];
+    IceCandidate* remote = &agent->remote_candidates[remote_idx];
+    if (local->addr.family != remote->addr.family) continue;
+    if (agent_candidate_pair_is_impossible(agent, local, remote)) continue;
+    if (agent->candidate_pairs_num >= AGENT_MAX_CANDIDATE_PAIRS) {
+      LOGE("Too many ICE candidate pairs (trickle)");
+      break;
+    }
+    agent->candidate_pairs[agent->candidate_pairs_num].local = local;
+    agent->candidate_pairs[agent->candidate_pairs_num].remote = remote;
+    agent->candidate_pairs[agent->candidate_pairs_num].priority = local->priority + remote->priority;
+    agent->candidate_pairs[agent->candidate_pairs_num].state = ICE_CANDIDATE_STATE_FROZEN;
+    agent->candidate_pairs[agent->candidate_pairs_num].conncheck = 0;
+    agent->candidate_pairs[agent->candidate_pairs_num].conncheck_timestamp = 0;
+    agent->candidate_pairs_num++;
+    added++;
+  }
+  LOGI("trickle candidate %d: +%d pairs (total %d)", remote_idx, added, agent->candidate_pairs_num);
+  return added;
 }
 
 void agent_update_candidate_pairs(Agent* agent) {
