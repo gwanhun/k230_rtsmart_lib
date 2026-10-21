@@ -135,3 +135,59 @@ void utils_get_md5(const char* input, size_t input_len, unsigned char* output) {
   mbedtls_md_finish(&ctx, output);
   mbedtls_md_free(&ctx);
 }
+
+
+#if LOG_REDIRECT
+/* libpeer 로그를 링버퍼에 모아 MicroPython(webrtc.log_read)이 꺼내 찍게 한다.
+ * 기본 fprintf(stdout) 는 K230 에서 USB 콘솔이 아닌 디버그 UART 로 나가 보이지 않았다(2026-10-21). */
+#include <stdarg.h>
+#include <pthread.h>
+#define PEER_LOG_BUF 16384
+static char s_log_buf[PEER_LOG_BUF];
+static int s_log_len = 0;
+static int s_log_dropped = 0;
+static pthread_mutex_t s_log_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void peer_log(char* level_tag, const char* file_name, int line_number, const char* fmt, ...) {
+  char line[256];
+  const char* base = strrchr(file_name, '/');
+  int n, m, total;
+  va_list ap;
+  base = base ? base + 1 : file_name;
+  n = snprintf(line, sizeof(line), "%s %s:%d ", level_tag, base, line_number);
+  if (n < 0) n = 0;
+  if (n > (int)sizeof(line) - 2) n = (int)sizeof(line) - 2;
+  va_start(ap, fmt);
+  m = vsnprintf(line + n, sizeof(line) - n - 1, fmt, ap);
+  va_end(ap);
+  if (m < 0) m = 0;
+  total = n + m;
+  if (total > (int)sizeof(line) - 2) total = (int)sizeof(line) - 2;
+  line[total++] = '\n';
+  pthread_mutex_lock(&s_log_mutex);
+  if (s_log_len + total <= PEER_LOG_BUF) {
+    memcpy(s_log_buf + s_log_len, line, total);
+    s_log_len += total;
+  } else {
+    s_log_dropped++;
+  }
+  pthread_mutex_unlock(&s_log_mutex);
+}
+
+int peer_log_read(char* out, int max, int* dropped) {
+  int n;
+  pthread_mutex_lock(&s_log_mutex);
+  n = s_log_len < max ? s_log_len : max;
+  if (n > 0) {
+    memcpy(out, s_log_buf, n);
+    memmove(s_log_buf, s_log_buf + n, s_log_len - n);
+    s_log_len -= n;
+  }
+  if (dropped) {
+    *dropped = s_log_dropped;
+    s_log_dropped = 0;
+  }
+  pthread_mutex_unlock(&s_log_mutex);
+  return n;
+}
+#endif
