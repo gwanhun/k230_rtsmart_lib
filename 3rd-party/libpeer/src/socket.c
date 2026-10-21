@@ -1,10 +1,13 @@
-#include <sys/time.h>
 #include <errno.h>
 #include <string.h>
 #include <unistd.h>
 
 #include "socket.h"
 #include "utils.h"
+
+/* 미디어(RTP) 전송만 논블로킹으로: single-thread WebRTC 루프가 relay 경로 버퍼 포화 시
+ * 블로킹 sendto 에서 16초 멈추는 문제(2026-10-21). DTLS/STUN/TURN 제어 전송은 블로킹 유지. */
+volatile int udp_send_nonblock = 0;
 
 int udp_socket_add_multicast_group(UdpSocket* udp_socket, Address* mcast_addr) {
   int ret = 0;
@@ -79,17 +82,6 @@ static int udp_socket_open_internal(UdpSocket* udp_socket, int family, int port,
     if ((ret = bind(udp_socket->fd, sa, sock_len)) < 0) {
       LOGE("Failed to bind socket: %d", ret);
       break;
-    }
-    {
-      /* 송신 타임아웃 100ms: rt-smart/lwIP 의 블로킹 sendto 가 버퍼 포화 시 수 초~16초
-       * single-thread WebRTC 루프를 정지시키는 것을 막는다. 핸드셰이크 등 소량 패킷은
-       * 100ms 안에 정상 전송되고, 포화된 미디어만 타임아웃 후 드롭된다(2026-10-21). */
-      struct timeval snd_to;
-      snd_to.tv_sec = 0;
-      snd_to.tv_usec = 100000;
-      if (setsockopt(udp_socket->fd, SOL_SOCKET, SO_SNDTIMEO, &snd_to, sizeof(snd_to)) < 0) {
-        LOGW("SO_SNDTIMEO failed. ignore");
-      }
     }
 
     if (getsockname(udp_socket->fd, sa, &sock_len) < 0) {
@@ -171,9 +163,16 @@ int udp_socket_sendto(UdpSocket* udp_socket, Address* addr, const uint8_t* buf, 
       break;
   }
 
-  if ((ret = sendto(udp_socket->fd, buf, len, 0, sa, sock_len)) < 0) {
+  {
+    int send_flags = 0;
+#ifdef MSG_DONTWAIT
+    if (udp_send_nonblock) send_flags = MSG_DONTWAIT;
+#endif
+    ret = sendto(udp_socket->fd, buf, len, send_flags, sa, sock_len);
+  }
+  if (ret < 0) {
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
-      return len;  /* SO_SNDTIMEO 초과: 이 패킷 드롭(RTP 비신뢰). 상위엔 '보냄'으로 보고 */
+      return len;  /* 미디어 드롭(RTP 비신뢰) — 상위엔 '보냄'으로 보고 */
     }
     LOGE("Failed to sendto: %s", strerror(errno));
     return -1;
